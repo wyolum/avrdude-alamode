@@ -31,6 +31,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
+
 
 #include "avrdude.h"
 #include "pgm.h"
@@ -46,8 +48,14 @@
 #include <sys/stat.h>
 // Access from ARM Running Linux
 
-#define BCM2708_PERI_BASE        0x20000000
-#define GPIO_BASE                (BCM2708_PERI_BASE + 0x200000) /* GPIO controller */
+#define BCM2836_PERI_BASE        0x3F000000
+#define BCM2835_PERI_BASE        0x20000000
+
+static volatile uint32_t gpio_base;
+static volatile uint32_t piPeriphBase = 0x20000000;
+static volatile uint32_t piModel = 1;
+
+
 
 #define PAGE_SIZE (4*1024)
 #define BLOCK_SIZE (4*1024)
@@ -143,7 +151,7 @@ static void alamode_close(PROGRAMMER * pgm)
   pgm->fd.ifd = -1;
 }
 
-void setup_io();
+static void setup_io();
 void alamode_initpgm(PROGRAMMER * pgm)
 {
 	/* This is mostly a STK500; just the signature is read
@@ -160,9 +168,64 @@ void alamode_initpgm(PROGRAMMER * pgm)
 }
 // GPIO functions
 //
+// determine Raspberry Pi revision
+//
+unsigned gpioHardwareRevision(void)
+{
+  static unsigned rev = 0;
+
+  FILE * filp;
+  char buf[512];
+  char term;
+  int chars=4; /* number of chars in revision string */
+
+  if (rev) return rev;
+
+  piModel = 0;
+
+  filp = fopen ("/proc/cpuinfo", "r");
+
+  if (filp != NULL)
+    {
+      while (fgets(buf, sizeof(buf), filp) != NULL)
+	{
+	  if (piModel == 0)
+	    {
+	      if (!strncasecmp("model name", buf, 10))
+		{
+		  if (strstr (buf, "ARMv6") != NULL)
+		    {
+		      piModel = 1;
+		      chars = 4;
+		      piPeriphBase = 0x20000000;
+		    }
+		  else if (strstr (buf, "ARMv7") != NULL)
+		    {
+		      piModel = 2;
+		      chars = 6;
+		      piPeriphBase = 0x3F000000;
+		    }
+		}
+	    }
+
+	  if (!strncasecmp("revision", buf, 8))
+	    {
+	      if (sscanf(buf+strlen(buf)-(chars+1),
+			 "%x%c", &rev, &term) == 2)
+		{
+		  if (term != '\n') rev = 0;
+		}
+	    }
+	}
+
+      fclose(filp);
+    }
+  return rev;
+}
+
 // Set up a memory regions to access GPIO
 //
-void setup_io()
+static void setup_io()
 {
   /* open /dev/mem */
   if ((mem_fd = open("/dev/mem", O_RDWR|O_SYNC) ) < 0) {
@@ -171,7 +234,9 @@ void setup_io()
   }
 
   /* mmap GPIO */
-
+  // determine Pi revision
+  gpioHardwareRevision(); // side effect sets piPeriphBase
+  gpio_base =   (piPeriphBase + 0x200000);
   // Allocate MAP block
   if ((gpio_mem = malloc(BLOCK_SIZE + (PAGE_SIZE-1))) == NULL) {
     printf("allocation error \n");
@@ -189,7 +254,7 @@ void setup_io()
 				   PROT_READ|PROT_WRITE,
 				   MAP_SHARED|MAP_FIXED,
 				   mem_fd,
-      GPIO_BASE
+				   gpio_base
 				   );
 
   if ((long)gpio_map < 0) {
